@@ -1,0 +1,60 @@
+name: ${LAB_MONITORING_PROJECT:?Use lab.sh monitoring-up}
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    # The host can reach its libvirt guest; Docker bridge forwarding cannot.
+    # Explicit loopback listeners avoid adding host firewall rules or proxies.
+    network_mode: host
+    command:
+      - --web.listen-address=127.0.0.1:${LAB_PROMETHEUS_PORT:?Use lab.sh monitoring-up}
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --storage.tsdb.retention.size=256MB
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${LAB_MONITORING_BUILD_DIRECTORY:?Use lab.sh monitoring-up}/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    labels:
+      com.myscoutee.task: ${LAB_ISSUE:?Use lab.sh monitoring-up}
+  grafana:
+    image: grafana/grafana:13.2.3
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "${LAB_GRAFANA_PORT:?Use lab.sh monitoring-up}"
+      GF_SECURITY_ADMIN_USER: lab
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Use lab.sh monitoring-up}
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    volumes:
+      - ${LAB_MONITORING_BUILD_DIRECTORY:?Use lab.sh monitoring-up}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${LAB_MONITORING_BUILD_DIRECTORY:?Use lab.sh monitoring-up}/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    labels:
+      com.myscoutee.task: ${LAB_ISSUE:?Use lab.sh monitoring-up}
+volumes:
+  prometheus-data:
+    labels:
+      com.myscoutee.task: ${LAB_ISSUE:?Use lab.sh monitoring-up}
+  grafana-data:
+    labels:
+      com.myscoutee.task: ${LAB_ISSUE:?Use lab.sh monitoring-up}

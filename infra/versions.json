@@ -1,0 +1,16 @@
+{
+  "terraform": {
+    "version": "1.16.5",
+    "url": "https://releases.hashicorp.com/terraform/1.16.5/terraform_1.16.5_linux_amd64.zip",
+    "sha256": "2bc2fcfff033265c9e02ca0351f01794eb122f62a9b2a49a3294b9e49eaab5e4"
+  },
+  "ubuntu": {
+    "url": "https://cloud-images.ubuntu.com/noble/20260926/noble-server-cloudimg-amd64.img",
+    "sha256": "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2"
+  },
+  "k3s": {
+    "version": "v1.37.1+k3s1",
+    "url": "https://github.com/k3s-io/k3s/releases/download/v1.37.1+k3s1/k3s",
+    "sha256": "92b94582eb7b34a8cf532e6006842b9ed215a6783cf56a3dd6271fd35243b2c0"
+  }
+}

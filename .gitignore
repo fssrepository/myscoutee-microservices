@@ -1,0 +1,11 @@
+build/
+__pycache__/
+*.pyc
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+.gradle/
+*.local.env

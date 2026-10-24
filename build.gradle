@@ -1,0 +1,117 @@
+import groovy.json.JsonSlurper
+
+plugins {
+    alias(libs.plugins.spring.boot) apply false
+    alias(libs.plugins.dependency.management) apply false
+}
+ext.backendRoot = gradle.ext.microservicesBackendRoot
+ext.configRoot = new File(backendRoot, 'config/microservices')
+layout.buildDirectory = new File(backendRoot, 'server/build/microservices')
+ext.backendJava = new File(backendRoot, 'server/projects/profile/src/main/java')
+ext.backendResources = new File(backendRoot, 'server/projects/profile/src/main/resources')
+// Optional distributed compilation units keep their original Java packages.
+def domainSourceRoot = new File(backendJava, 'com/raxim/myscoutee/domain')
+ext.optionalUnits = domainSourceRoot.listFiles().findAll { it.directory }.collect {
+    new File(it, 'transport')
+} + ['bootstrap', 'transport'].collect {
+    new File(backendJava, "com/raxim/myscoutee/common/microservices/${it}")
+}
+ext.optionalMainJava = optionalUnits.collect { new File(it, 'src/main/java') }
+ext.optionalTestJava = optionalUnits.collect { new File(it, 'src/test/java') }
+ext.assemblyConfiguration = new JsonSlurper().parse(new File(configRoot, 'assemblies.json'))
+ext.assemblies = assemblyConfiguration.services
+ext.baseDomains = new JsonSlurper().parse(new File(backendRoot, 'server/gradle/base-domains.json'))
+ext.packageRoot = 'com/raxim/myscoutee/'
+ext.transportUsage = new JsonSlurper().parseText(providers.exec {
+    commandLine 'python3', file('tools/transport_usage.py'), configRoot, backendRoot
+}.standardOutput.asText.get())
+
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'io.spring.dependency-management'
+    apply from: new File(rootProject.backendRoot, 'server/gradle/dependency-policy.gradle')
+    apply from: new File(rootProject.backendRoot, 'server/gradle/base-dependencies.gradle')
+    group = 'com.raxim.myscoutee.microservices'
+    version = rootProject.assemblyConfiguration.version
+    layout.buildDirectory = rootProject.layout.buildDirectory.dir(name)
+    repositories { mavenCentral() }
+    java { toolchain { languageVersion = JavaLanguageVersion.of(libs.versions.java.get().toInteger()) } }
+    dependencyManagement {
+        imports { mavenBom "org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.get()}" }
+    }
+    // Canonical Mongo model accessors are generated at compile time only.
+    dependencies {
+        implementation 'com.raxim.myscoutee.base:transport-read'
+        implementation 'com.raxim.myscoutee.base:access-transport'
+        implementation 'com.raxim.myscoutee.base:accounts-transport'
+        implementation 'com.raxim.myscoutee.base:chat-transport'
+        implementation 'com.raxim.myscoutee.base:email-transport'
+        implementation 'com.raxim.myscoutee.base:notifications-transport'
+        implementation 'com.raxim.myscoutee.base:platform-transport'
+        implementation 'com.raxim.myscoutee.base:service-bootstrap'
+        compileOnly libs.lombok
+        annotationProcessor libs.lombok
+        testCompileOnly libs.lombok
+        testAnnotationProcessor libs.lombok
+    }
+    tasks.withType(JavaCompile).configureEach { options.compilerArgs += ['-parameters'] }
+}
+
+project(':contracts') {
+    dependencies {
+        api 'com.raxim.myscoutee.base:access-api'
+        api 'com.raxim.myscoutee.base:accounts-api'
+        api 'com.raxim.myscoutee.base:administration-api'
+        api 'com.raxim.myscoutee.base:chat-api'
+        api 'com.raxim.myscoutee.base:common-api'
+        api 'com.raxim.myscoutee.base:common-mongo'
+        api 'com.raxim.myscoutee.base:email-api'
+        api 'com.raxim.myscoutee.base:help-api'
+        api 'com.raxim.myscoutee.base:integrations-api'
+        api 'com.raxim.myscoutee.base:localization-api'
+        api 'com.raxim.myscoutee.base:media-api'
+        api 'com.raxim.myscoutee.base:notifications-api'
+        api 'com.raxim.myscoutee.base:platform-api'
+    }
+    sourceSets.main.java {
+        srcDir rootProject.backendJava
+        include 'com/raxim/myscoutee/domain/*/api/**'
+        include 'com/raxim/myscoutee/domain/*/dto/**'
+        include 'com/raxim/myscoutee/common/dto/**'
+        include 'com/raxim/myscoutee/common/security/crypto/**'
+        include 'com/raxim/myscoutee/common/security/http/HttpSecurityContribution.java'
+        include 'com/raxim/myscoutee/common/measurement/EvidenceCursor.java'
+        include 'com/raxim/myscoutee/common/measurement/MeasurementEvidence.java'
+        // This DTO is used only inside community and intentionally contains owner documents.
+        exclude 'com/raxim/myscoutee/domain/community/dto/CaseAppointmentDtos.java'
+    }
+    dependencies {
+        compileOnly 'org.springframework.boot:spring-boot-starter-web'
+        compileOnly 'org.springframework.boot:spring-boot-starter-data-mongodb'
+        compileOnly 'org.springframework.boot:spring-boot-starter-security'
+        compileOnly 'org.springframework.boot:spring-boot-starter-validation'
+        compileOnly libs.firebase
+        compileOnly libs.bouncycastle
+    }
+}
+
+project(':bootstrap-tests') { apply from: rootProject.file('build-logic/transport-tests.gradle') }
+
+assemblies.each { serviceName, assembly ->
+    project(":${serviceName}") {
+        ext.assembly = assembly
+        apply from: rootProject.file('build-logic/service.gradle')
+    }
+}
+
+tasks.register('assembleServices') {
+    group = 'build'
+    description = 'Build the configured independent domain assemblies from canonical sources.'
+    dependsOn assemblies.keySet().collect { ":${it}:bootJar" }
+}
+tasks.register('verifyAssemblies', Exec) {
+    group = 'verification'
+    dependsOn 'assembleServices', ':bootstrap-tests:test'
+    environment 'MYSCOUTEE_BACKEND_SOURCE', backendRoot.absolutePath
+    commandLine 'python3', file('tools/audit-assemblies.py'), '--artifacts'
+}

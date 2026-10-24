@@ -1,0 +1,67 @@
+apply plugin: 'jacoco'
+
+sourceSets.main.java {
+    srcDir rootProject.backendJava
+    srcDirs rootProject.optionalMainJava
+    exclude 'com/raxim/myscoutee/domain/*/transport/src/**'
+    exclude 'com/raxim/myscoutee/common/microservices/**'
+    include '**/ServiceSecurityConfiguration.java'
+    include '**/ChatWebSocketTransportConfiguration.java'
+    include '**/PolicyAuthorizationConfiguration.java'
+    include 'com/raxim/myscoutee/common/security/policy/**'
+    include '**/transport/**'
+}
+sourceSets.test.java {
+    srcDirs = [rootProject.backendJava] + rootProject.optionalTestJava
+    exclude 'com/raxim/myscoutee/domain/*/transport/src/**'
+    exclude 'com/raxim/myscoutee/common/microservices/**'
+    new groovy.json.JsonSlurper().parse(new File(rootProject.configRoot, 'tests.json')).testJavaIncludes.each { include it }
+}
+
+dependencies {
+    implementation project(':contracts')
+    testImplementation 'com.raxim.myscoutee.base:access'
+    testImplementation 'com.raxim.myscoutee.base:accounts'
+    testImplementation 'com.raxim.myscoutee.base:administration'
+    testImplementation 'com.raxim.myscoutee.base:chat'
+    testImplementation 'com.raxim.myscoutee.base:common-core'
+    testImplementation 'com.raxim.myscoutee.base:common-mongo'
+    testImplementation 'com.raxim.myscoutee.base:common-redis'
+    implementation 'com.raxim.myscoutee.base:common-security'
+    testImplementation 'com.raxim.myscoutee.base:common-session-web'
+    testImplementation 'com.raxim.myscoutee.base:email'
+    testImplementation 'com.raxim.myscoutee.base:help'
+    testImplementation 'com.raxim.myscoutee.base:integrations'
+    testImplementation 'com.raxim.myscoutee.base:localization'
+    testImplementation 'com.raxim.myscoutee.base:media'
+    testImplementation 'com.raxim.myscoutee.base:notifications'
+    testImplementation 'com.raxim.myscoutee.base:platform-business'
+    testImplementation 'com.raxim.myscoutee.base:localization-transport'
+    implementation 'org.springframework:spring-tx'
+    implementation 'org.mongodb:bson'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.security:spring-security-oauth2-jose'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
+    testRuntimeOnly 'io.micrometer:micrometer-registry-prometheus'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.security:spring-security-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+test {
+    useJUnitPlatform()
+    finalizedBy tasks.named('jacocoTestReport')
+    systemProperty 'transportBindingsPath', new File(rootProject.configRoot, 'transport/bindings.json').absolutePath
+    systemProperty 'wireEvidenceDirectory', layout.buildDirectory.dir('wire-evidence').get().asFile.absolutePath
+}
+jar { enabled = false }
+
+tasks.named('jacocoTestReport') {
+    dependsOn test
+    reports {
+        xml.required = true
+        xml.outputLocation = layout.buildDirectory.file('reports/jacoco.xml')
+    }
+}

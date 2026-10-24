@@ -1,0 +1,8 @@
+# Public trust material only. The simulator retains its TLS private key in its PVC.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: release-simulator-ca
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}}
+data:
+  certificate.pem: {{ .Values.releaseSimulatorCertificate | quote }}

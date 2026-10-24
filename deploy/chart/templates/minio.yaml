@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}, app.kubernetes.io/name: minio}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: {{ .Values.minio.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}, app.kubernetes.io/name: minio}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app.kubernetes.io/name: minio}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}, app.kubernetes.io/name: minio}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: minio
+        image: {{ .Values.images.minio.reference | quote }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 16Mi}
+          limits:
+            cpu: '1'
+            memory: {{ .Values.minio.memoryMiB }}Mi
+            ephemeral-storage: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        envFrom:
+        - secretRef: {name: minio-bootstrap}
+        env:
+        - {name: HOME, value: /tmp}
+        - {name: MC_CONFIG_DIR, value: /tmp/mc}
+        - {name: GOMEMLIMIT, value: 300MiB}
+        - {name: MINIO_REGION_NAME, value: eu-central-1}
+        - {name: MEDIA_BUCKET, value: myscoutee-media}
+        ports:
+        - {name: s3, containerPort: 9000}
+        - {name: console, containerPort: 9001}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: tmp, mountPath: /tmp}
+        startupProbe:
+          exec:
+            command: [/bin/sh, -c, 'test -f /tmp/myscoutee-minio-seeded']
+          periodSeconds: 2
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: {path: /minio/health/ready, port: s3}
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: {path: /minio/health/live, port: s3}
+          periodSeconds: 10
+      volumes:
+      - name: data
+        persistentVolumeClaim: {claimName: minio}
+      - name: tmp
+        emptyDir: {sizeLimit: 32Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}, app.kubernetes.io/name: minio}
+spec:
+  selector: {app.kubernetes.io/name: minio}
+  type: ClusterIP
+  ports:
+  - {name: s3, port: 9000, targetPort: s3}
+  - {name: console, port: 9001, targetPort: console}

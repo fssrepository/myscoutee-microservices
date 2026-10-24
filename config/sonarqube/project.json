@@ -1,0 +1,6 @@
+{
+  "id": "microservices-runtime",
+  "modules": {
+    "runtime": "."
+  }
+}

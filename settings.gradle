@@ -1,0 +1,36 @@
+def backendRoot = file(providers.gradleProperty('backendSourceDir')
+    .orElse(providers.environmentVariable('MYSCOUTEE_BACKEND_SOURCE'))
+    .orElse(providers.environmentVariable('PWD')).get()).canonicalFile
+if (!new File(backendRoot, 'server/gradle/libs.versions.toml').isFile()) {
+    throw new GradleException("Compatible backend source not found at ${backendRoot}; set MYSCOUTEE_BACKEND_SOURCE.")
+}
+gradle.ext.microservicesBackendRoot = backendRoot
+def configRoot = new File(backendRoot, 'config/microservices')
+def outputRoot = new File(backendRoot, 'server/build/microservices')
+dependencyResolutionManagement {
+    versionCatalogs {
+        libs { from(files(new File(backendRoot, 'server/gradle/libs.versions.toml'))) }
+    }
+}
+include('contracts', 'bootstrap-tests')
+def assembly = new groovy.json.JsonSlurper().parse(new File(configRoot, 'assemblies.json'))
+rootProject.name = assembly.projectName
+def domainRoot = new File(backendRoot, 'server/projects/profile/src/main/java/com/raxim/myscoutee/domain')
+def expectedDomains = domainRoot.listFiles().findAll { it.directory }.collect { it.name }.toSet()
+def baseDomains = new groovy.json.JsonSlurper().parse(new File(backendRoot, 'server/gradle/base-domains.json'))
+expectedDomains.addAll(baseDomains.keySet())
+def assignedDomains = assembly.services.values().collectMany { it.domains }
+if (assignedDomains.size() != assignedDomains.toSet().size() || assignedDomains.toSet() != expectedDomains) {
+    throw new GradleException('assemblies.json must assign every canonical domain to exactly one service.')
+}
+assembly.services.keySet().each { name ->
+    if (!(name ==~ /[a-z][a-z0-9-]*/)) throw new GradleException("Invalid service name: ${name}")
+    include(name)
+    def descriptor = new File(outputRoot, "projects/${name}")
+    descriptor.mkdirs()
+    project(":${name}").projectDir = descriptor
+}
+
+def testsDescriptor = new File(outputRoot, 'projects/bootstrap-tests')
+testsDescriptor.mkdirs()
+project(':bootstrap-tests').projectDir = testsDescriptor

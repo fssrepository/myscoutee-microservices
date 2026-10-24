@@ -1,0 +1,33 @@
+# The status receiver may only observe discovery state in this namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runtime-status
+  namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runtime-status
+  namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}}
+rules:
+- apiGroups: [discovery.k8s.io]
+  resources: [endpointslices]
+  verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runtime-status
+  namespace: {{ .Release.Namespace }}
+  labels: {app.kubernetes.io/part-of: {{ $.Release.Namespace }}}
+subjects:
+- kind: ServiceAccount
+  name: runtime-status
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: runtime-status

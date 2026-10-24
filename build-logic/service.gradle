@@ -1,0 +1,154 @@
+// Each project compiles owner implementations only; it never depends on the monolith.
+apply plugin: 'org.springframework.boot'
+def canonicalJava = rootProject.backendJava
+def packageRoot = rootProject.packageRoot
+def generatedJava = layout.buildDirectory.dir('generated/java')
+def generatedResources = layout.buildDirectory.dir('generated/resources')
+def domains = assembly.domains
+def bindingsFile = new File(rootProject.configRoot, 'transport/bindings.json')
+def bindingManifest = new groovy.json.JsonSlurper().parse(bindingsFile)
+def bindings = bindingManifest.bindings
+def transportSources = fileTree(canonicalJava).matching {
+    domains.each { domain -> include "${packageRoot}domain/${domain}/**/*.java" }
+    exclude "${packageRoot}domain/*/transport/src/**"
+}
+def transportConfigurations = bindings.collect { binding ->
+    def owner = domains.contains(binding.domain)
+    def references = ([binding.api] + (binding.providedApis ?: [])).collect {
+        "com.raxim.myscoutee.domain.${binding.domain}.api.${it}"
+    } + (binding.consumerApis ?: [])
+    def consumer = rootProject.transportUsage[binding.configuration].any { domains.contains(it) }
+    owner || consumer ? "${binding.package}.${binding.configuration}${owner ? 'Server' : 'Client'}Configuration" : null
+}.findAll { it != null }
+def explicitImports = transportConfigurations.collect { 'com.raxim.myscoutee.microservices.transport.' + it }
+explicitImports += rootProject.assemblyConfiguration.sharedConfigurationImports
+if (domains.contains('accounts')) {
+    explicitImports += 'com.raxim.myscoutee.microservices.transport.security.ActorDelegationBrokerServerConfiguration'
+    explicitImports += 'com.raxim.myscoutee.common.config.WebSecurityConfig'
+    explicitImports += 'com.raxim.myscoutee.microservices.transport.security.PublicAuthorizationOwnerConfiguration'
+} else {
+    explicitImports += 'com.raxim.myscoutee.microservices.transport.security.PublicAuthorizationClientConfiguration'
+}
+(bindingManifest.localBindings ?: []).each { binding ->
+    def references = ([binding.api] + (binding.providedApis ?: [])).collect {
+        "com.raxim.myscoutee.domain.${binding.domain}.api.${it}"
+    }
+    if ((binding.includeOwner || !domains.contains(binding.domain)) && rootProject.transportUsage[binding.configuration].any { domains.contains(it) }) {
+        explicitImports += 'com.raxim.myscoutee.microservices.bootstrap.' + binding.configuration
+    }
+}
+if (assembly.starters.contains('data-redis')) explicitImports += 'com.raxim.myscoutee.common.redis.RedisStreamRetentionService'
+if (domains.contains('chat')) explicitImports += 'com.raxim.myscoutee.common.config.ChatWebSocketConfig'
+if (domains.contains('chat') && !domains.contains('accounts')) explicitImports += 'com.raxim.myscoutee.microservices.bootstrap.ChatWebSocketTransportConfiguration'
+
+def sharedPaths = [
+    'common/runtime/**', 'common/util/**', 'common/converter/**', 'common/mongo/**',
+    'common/controller/PaymentProviderChangedExceptionHandler.java',
+    'common/measurement/MongoEvidenceCursor.java', 'common/security/policy/**', 'common/security/media/**',
+    'common/config/repository/**', 'common/config/caching/**',
+    'common/config/MongoRoutingConfig.java', 'common/config/MongoConverterConfig.java',
+    'common/config/PlatformParametersService.java',
+    'common/config/JsonConfig.java', 'common/config/CachingConfig.java',
+    'common/config/mongo/SessionRoutingMongoDatabaseFactory.java',
+    'common/config/mongo/MongoPrivacyOperations.java',
+    'common/config/mongo/MongoStatusUpdates.java',
+    'common/config/mongo/MongoDocumentValues.java',
+    'common/config/mongo/DemoSessionRequestSupport.java'
+]
+if (domains.contains('accounts')) sharedPaths += ['common/config/WebSecurityConfig.java', 'common/config/mongo/SessionMongoRoutingFilter.java']
+if (assembly.starters.contains('data-redis')) sharedPaths += 'common/redis/**'
+if (domains.contains('chat')) sharedPaths += 'common/config/ChatWebSocketConfig.java'
+sharedPaths += rootProject.assemblyConfiguration.sharedJavaIncludes
+sourceSets.main.java {
+    srcDirs = [canonicalJava] + rootProject.optionalMainJava + [generatedJava]
+    exclude "${packageRoot}domain/*/transport/src/**"
+    exclude "${packageRoot}common/microservices/**"
+    domains.each { domain -> include "${packageRoot}domain/${domain}/**" }
+    sharedPaths.each { path -> include "${packageRoot}${path}" }
+    include "${packageRoot}microservices/**"
+    if (!domains.contains('chat') || domains.contains('accounts')) exclude "${packageRoot}microservices/bootstrap/ChatWebSocketTransportConfiguration.java"
+    exclude "${packageRoot}domain/*/api/**"
+    exclude { element -> element.path ==~ 'com/raxim/myscoutee/domain/[^/]+/dto/.*' && !element.path.endsWith('/CaseAppointmentDtos.java') }
+    if (!domains.contains('accounts')) exclude "${packageRoot}common/util/ClosableCallback.java"
+}
+sourceSets.main.resources.srcDir(generatedResources)
+dependencies {
+    implementation project(':contracts')
+    implementation 'com.raxim.myscoutee.base:common-core'
+    implementation 'com.raxim.myscoutee.base:common-security'
+    if (domains.contains('accounts')) implementation 'com.raxim.myscoutee.base:common-session-web'
+    if (assembly.starters.contains('data-redis')) implementation 'com.raxim.myscoutee.base:common-redis'
+    implementation 'com.raxim.myscoutee.base:localization-transport'
+    domains.findAll { rootProject.baseDomains.containsKey(it) }.each { domain ->
+        implementation "com.raxim.myscoutee.base:${rootProject.baseDomains[domain]}"
+    }
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+    implementation('com.querydsl:querydsl-mongodb') {
+        exclude group: 'org.mongodb', module: 'mongo-java-driver'
+    }
+    assembly.starters.each { starter -> implementation "org.springframework.boot:spring-boot-starter-${starter}" }
+    assembly.libraries.each { library -> implementation rootProject.extensions.getByType(VersionCatalogsExtension).named('libs').findLibrary(library.replace('.', '-')).get() }
+    implementation 'org.springframework.security:spring-security-data'
+    implementation 'org.springframework.security:spring-security-oauth2-jose'
+    if (domains.contains('accounts')) implementation 'org.apache.httpcomponents:httpasyncclient'
+}
+
+tasks.register('generateAssembly') {
+    inputs.file bindingsFile
+    inputs.files transportSources
+    inputs.property 'transportConfigurations', transportConfigurations
+    inputs.file new File(rootProject.configRoot, 'assemblies.json')
+    inputs.file new File(rootProject.backendResources, 'application.yaml')
+    inputs.file new File(rootProject.backendResources, 'application-prod.yaml')
+    inputs.file new File(rootProject.backendResources, 'mongo-domain-types.properties')
+    inputs.property 'backendRevision', providers.gradleProperty('backendRevision').orElse('working-tree')
+    outputs.dirs generatedJava, generatedResources
+    doLast {
+        def packages = domains.collect { 'com.raxim.myscoutee.domain.' + it }
+        def quoted = { values -> values.collect { '"' + it + '"' }.join(', ') }
+        def javaDir = new File(generatedJava.get().asFile, packageRoot + 'microservices/bootstrap')
+        javaDir.mkdirs()
+        new File(javaDir, 'AssemblyConfiguration.java').text = """package com.raxim.myscoutee.microservices.bootstrap;
+
+// Generated from assemblies.json; business source remains in the backend.
+@org.springframework.context.annotation.Configuration(proxyBeanMethods = false)
+${explicitImports ? '@org.springframework.context.annotation.Import({' + explicitImports.collect { it + '.class' }.join(', ') + '})' : ''}
+@org.springframework.context.annotation.ComponentScan(basePackages = {${quoted(packages)}})
+@org.springframework.boot.context.properties.ConfigurationPropertiesScan(basePackages = {${quoted(packages)}})
+@org.springframework.data.mongodb.repository.config.EnableMongoRepositories(
+    repositoryFactoryBeanClass = ${rootProject.assemblyConfiguration.repositoryFactoryBean}.class,
+    basePackages = {${quoted(packages.collect { it + '.repository' })}})
+public class AssemblyConfiguration {}
+"""
+        def resources = generatedResources.get().asFile
+        resources.mkdirs()
+        // Reuse production defaults; remove only monolith startup choices.
+        def application = new File(rootProject.backendResources, 'application.yaml').text
+            .replace('active: \${SPRING_DEV:dev}', 'active: \${SPRING_PROFILES_ACTIVE:prod}')
+            .replace('allow-bean-definition-overriding: true', 'allow-bean-definition-overriding: false')
+        new File(resources, 'application.yaml').text = application
+        new File(resources, 'application-prod.yaml').bytes = new File(rootProject.backendResources, 'application-prod.yaml').bytes
+        def names = new Properties()
+        new File(rootProject.backendResources, 'mongo-domain-types.properties').withInputStream { names.load(it) }
+        new File(resources, 'mongo-domain-types.properties').text = names.findAll { stored, current ->
+            packages.any { current.startsWith(it + '.') }
+        }.sort().collect { stored, current -> "${stored}=${current}" }.join('\n') + '\n'
+        new File(resources, 'application.properties').text = """spring.application.name=${project.name}
+myscoutee.delegation.owner=${domains.contains('accounts')}
+management.server.port=8081
+management.endpoint.health.show-details=never
+management.metrics.tags.service=${project.name}
+management.metrics.distribution.percentiles-histogram.http.server.requests=true
+"""
+        def metadata = new File(resources, 'META-INF/myscoutee-assembly.properties')
+        metadata.parentFile.mkdirs()
+        metadata.text = "assembly=${project.name}\nissue=${rootProject.assemblyConfiguration.issue}\nbackend.revision=${inputs.properties.backendRevision}\ndomains=${domains.join(',')}\n"
+    }
+}
+tasks.named('compileJava') { dependsOn 'generateAssembly' }
+tasks.named('processResources') { dependsOn 'generateAssembly' }
+tasks.named('bootJar') {
+    archiveFileName = "myscoutee-${project.name}.jar"
+    mainClass = 'com.raxim.myscoutee.microservices.bootstrap.CoreApplication'
+}
+tasks.named('jar') { enabled = false }

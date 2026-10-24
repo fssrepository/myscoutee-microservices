@@ -1,0 +1,203 @@
+{{- range $name, $service := .Values.services }}
+{{- $transportValues := dict }}
+{{- range $environment, $credential := index $.Values.transportCredentialsByService $name }}
+{{- $_ := set $transportValues $environment (index $.Values.credentials $credential) }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: {{ $.Release.Namespace }}
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: {{ $service.replicas }}
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: {{ $.Release.Namespace }}
+        app.kubernetes.io/name: {{ $name }}
+      annotations:
+        myscoutee/transport-scope-version: '2'
+        checksum/runtime: {{ toJson $.Values.runtime | sha256sum }}
+        checksum/mongodb: {{ toJson $.Values.mongodb | sha256sum }}
+        checksum/transport-credentials: {{ toJson $transportValues | sha256sum }}
+        {{- if has "platform" $service.domains }}
+        checksum/configuration-key: {{ $.Values.credentials.configurationMasterKey | sha256sum }}
+        checksum/release-simulator-ca: {{ $.Values.releaseSimulatorCertificate | sha256sum }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- if or (has "registry" $service.domains) (has "platform" $service.domains) }}
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if has "affinity" $service.domains }}
+      # UserRatesService initializes account projections and group-scoped edges.
+      # Wait before starting its JVM; failed dependency startup is not a JVM crash.
+      initContainers:
+      - name: wait-for-startup-owners
+        image: {{ $.Values.images.redis.reference | quote }}
+        imagePullPolicy: {{ $.Values.imagePullPolicy }}
+        command: [/bin/sh, -ec]
+        args:
+        - |
+          {{- range $owner, $candidate := $.Values.services }}
+          {{- if and (ne $owner $name) (or (has "accounts" $candidate.domains) (has "groups" $candidate.domains)) }}
+          until wget -q -T 2 -O /dev/null http://{{ $owner }}:8081/health; do
+            sleep 2
+          done
+          {{- end }}
+          {{- end }}
+          echo 'Startup owners are ready.'
+        resources:
+          requests: {cpu: 5m, memory: 8Mi, ephemeral-storage: 16Mi}
+          limits: {cpu: 50m, memory: 32Mi, ephemeral-storage: 128Mi}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+      {{- end }}
+      containers:
+      - name: {{ $name }}
+        image: {{ index $.Values.images $name "reference" | quote }}
+        imagePullPolicy: {{ $.Values.imagePullPolicy }}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+            ephemeral-storage: 16Mi
+          limits:
+            cpu: '2'
+            memory: {{ $service.memoryMiB }}Mi
+            ephemeral-storage: 256Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: management
+          containerPort: 8081
+        envFrom:
+        - configMapRef:
+            name: runtime
+        - secretRef:
+            name: runtime
+        - secretRef:
+            name: transport-{{ $name }}
+        {{- if has "accounts" $service.domains }}
+        - secretRef:
+            name: actor-delegation-issuer
+        {{- end }}
+        env:
+        # Kubernetes already probes /health; the gateway watches EndpointSlices.
+        - name: MYSCOUTEE_RUNTIME_STATUS_ENABLED
+          value: "false"
+        {{- if has "platform" $service.domains }}
+        # Match Compose: the developer lab never queries the public release catalog.
+        - {name: OPERATOR_UPDATE_RELEASE_API_ORIGIN, value: "https://release-simulator:18445"}
+        - {name: OPERATOR_UPDATE_RELEASE_DOWNLOAD_ORIGIN, value: "https://release-simulator:18445"}
+        - {name: OPERATOR_UPDATE_TLS_CA_CERTIFICATE, value: /etc/myscoutee/update/release-simulator-ca.pem}
+        - {name: OPERATOR_UPDATE_INCLUDE_PRERELEASES, value: "true"}
+        {{- end }}
+        {{- if has "affinity" $service.domains }}
+        # Match the production replica-set override: reconnect reconciles the
+        # durable queue; no periodic affinity polling in stream mode.
+        - name: AFFINITY_RECOMPUTE_CHANGE_STREAM_ENABLED
+          value: {{ ternary "true" "false" $.Values.mongodb.replicaSet | quote }}
+        - name: AFFINITY_RECOMPUTE_CHANGE_STREAM_FALLBACK_POLL_ENABLED
+          value: "false"
+        {{- end }}
+        volumeMounts:
+        {{- if has "platform" $service.domains }}
+        # subPath exposes a regular file; the canonical crypto owner rejects symlinks.
+        - name: deployment-configuration
+          mountPath: {{ $.Values.configurationKeyPath | quote }}
+          subPath: deployment-master-key
+          readOnly: true
+        # Only the public certificate is exposed, never the simulator's TLS volume.
+        - name: release-simulator
+          mountPath: /etc/myscoutee/update/release-simulator-ca.pem
+          subPath: certificate.pem
+          readOnly: true
+        {{- end }}
+        {{- if has "registry" $service.domains }}
+        - name: registry-client
+          mountPath: /var/lib/myscoutee/registry-demo
+        {{- end }}
+        - name: tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          failureThreshold: 36
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          periodSeconds: 5
+      volumes:
+      {{- if has "platform" $service.domains }}
+      - name: deployment-configuration
+        secret:
+          secretName: deployment-configuration
+          defaultMode: 0440
+      - name: release-simulator
+        configMap:
+          name: release-simulator-ca
+      {{- end }}
+      {{- if has "registry" $service.domains }}
+      - name: registry-client
+        persistentVolumeClaim:
+          claimName: registry-client
+      {{- end }}
+      - name: tmp
+        emptyDir:
+          sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: {{ $.Release.Namespace }}
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+  type: ClusterIP
+  ports:
+  - name: service
+    port: 8080
+    targetPort: 8080
+  - name: management
+    port: 8081
+    targetPort: 8081
+{{- end }}
