@@ -59,3 +59,12 @@ hard-coded tool input. Seed, retry-migration execution, Mongo fixtures, native
 sessions, resource counters and runtime probes already have one shared owner.
 Project seed/migration policy and session route inputs remain in
 `config/microservices/seed.json` and `config/microservices/checks/session.json`.
+
+Client-IP bans must return 403 only to the banned address while other clients
+retain access. The public NodePort preserves external source IPs. Gateway
+readiness checks the existing port 8080 with a native TCP probe: a valid HTTP 403
+response is not a failed nginx process. From a configured, running application
+checkout, `python3 ../myscoutee-microservices/tools/check-client-ip-ban.py` compares
+the former HTTP probe with this behavior in two disposable pods. It verifies the
+banned and independent clients through Kubernetes Services and removes its own
+pods/services without changing the application's ban file or fixtures.
