@@ -93,6 +93,57 @@ dependencies {
     if (domains.contains('accounts')) implementation 'org.apache.httpcomponents:httpasyncclient'
 }
 
+// Export the existing Gradle model, not a second hand-maintained source map.
+// This task resolves inputs only; it never compiles a service or contracts JAR.
+tasks.register('writeAssemblyInputs') {
+    doLast {
+        def files = new TreeMap<String, String>()
+        def addSource = { File source ->
+            if (source.isFile()) {
+                def path = source.canonicalFile.toPath()
+                def backend = rootProject.backendRoot.canonicalFile.toPath()
+                def support = rootProject.projectDir.canonicalFile.toPath()
+                def key = path.startsWith(backend) ? 'backend/' + backend.relativize(path) :
+                    path.startsWith(support) ? 'support/' + support.relativize(path) : null
+                if (key == null) throw new GradleException('Assembly input outside source owners: ' + source.name)
+                files[key.toString()] = source.absolutePath
+            }
+        }
+        sourceSets.main.allSource.files.findAll {
+            !it.toPath().startsWith(layout.buildDirectory.get().asFile.toPath())
+        }.each(addSource)
+        project(':contracts').sourceSets.main.allSource.files.each(addSource)
+        ['build.gradle', 'settings.gradle', 'build-logic/service.gradle',
+         'gradlew', 'tools/assembly_images.py', 'tools/render-deployment.py',
+         'deploy/images/service.Dockerfile.template'].each { addSource(rootProject.file(it)) }
+        ['server/gradle/libs.versions.toml', 'server/gradle/base-domains.json',
+         'server/gradle/base-dependencies.gradle', 'server/gradle/dependency-policy.gradle',
+         'server/gradle/wrapper/gradle-wrapper.properties',
+         'server/projects/profile/src/main/resources/application.yaml',
+         'server/projects/profile/src/main/resources/application-prod.yaml',
+         'server/projects/profile/src/main/resources/mongo-domain-types.properties'].each {
+            addSource(new File(rootProject.backendRoot, it))
+        }
+        [project, project(':contracts')].each { owner ->
+            ['compileClasspath', 'runtimeClasspath', 'annotationProcessor'].each { configuration ->
+                owner.configurations.getByName(configuration).resolvedConfiguration.resolvedArtifacts.each { artifact ->
+                    if (!(artifact.id.componentIdentifier instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier)) {
+                        files['dependency/' + artifact.moduleVersion.id + '/' + artifact.file.name] = artifact.file.absolutePath
+                    }
+                }
+            }
+        }
+        def output = layout.buildDirectory.file('assembly-inputs.json').get().asFile
+        output.parentFile.mkdirs()
+        output.text = groovy.json.JsonOutput.toJson([
+            schemaVersion: 1, service: project.name, files: files,
+            properties: [assembly: assembly, imports: explicitImports,
+                repositoryFactoryBean: rootProject.assemblyConfiguration.repositoryFactoryBean,
+                issue: rootProject.assemblyConfiguration.issue, version: project.version.toString(),
+                java: java.toolchain.languageVersion.get().toString(), gradle: gradle.gradleVersion]]) + '\n'
+    }
+}
+
 tasks.register('generateAssembly') {
     inputs.file bindingsFile
     inputs.files transportSources
@@ -101,7 +152,7 @@ tasks.register('generateAssembly') {
     inputs.file new File(rootProject.backendResources, 'application.yaml')
     inputs.file new File(rootProject.backendResources, 'application-prod.yaml')
     inputs.file new File(rootProject.backendResources, 'mongo-domain-types.properties')
-    inputs.property 'backendRevision', providers.gradleProperty('backendRevision').orElse('working-tree')
+    inputs.property 'assemblyInputFingerprint', providers.gradleProperty('assemblyInputFingerprint.' + project.name).orElse('working-tree')
     outputs.dirs generatedJava, generatedResources
     doLast {
         def packages = domains.collect { 'com.raxim.myscoutee.domain.' + it }
@@ -142,7 +193,7 @@ management.metrics.distribution.percentiles-histogram.http.server.requests=true
 """
         def metadata = new File(resources, 'META-INF/myscoutee-assembly.properties')
         metadata.parentFile.mkdirs()
-        metadata.text = "assembly=${project.name}\nissue=${rootProject.assemblyConfiguration.issue}\nbackend.revision=${inputs.properties.backendRevision}\ndomains=${domains.join(',')}\n"
+        metadata.text = "assembly=${project.name}\nissue=${rootProject.assemblyConfiguration.issue}\nassembly.inputs.sha256=${inputs.properties.assemblyInputFingerprint}\ndomains=${domains.join(',')}\n"
     }
 }
 tasks.named('compileJava') { dependsOn 'generateAssembly' }

@@ -601,6 +601,43 @@ class WorkloadCredentialsTest(unittest.TestCase):
 
 
 class HostSafetyTest(unittest.TestCase):
+    def test_ready_host_start_does_not_use_sudo(self):
+        with patch.object(host,'unit_value',return_value='active'), patch.object(host,'run') as run:
+            host.start_unprivileged()
+            run.assert_called_once_with('virsh','-c','qemu:///system','uri')
+
+    def test_unauthorized_start_fails_without_interactive_prompt(self):
+        with patch.object(host,'unit_value',return_value='inactive'), \
+             patch.object(host,'run',return_value=subprocess.CompletedProcess([],1)) as run:
+            with self.assertRaisesRegex(RuntimeError,'authorize-start once'):
+                host.start_unprivileged()
+            run.assert_called_once_with('sudo','-n',*host.START_COMMAND,check=False)
+
+    def test_start_authorization_transfers_only_owned_policy_to_execution_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);policy=root/'policy';state={'phase':'installed','user':'labowner'}
+            with patch.object(host,'ROOT',root), patch.object(host,'START_POLICY',policy), \
+                 patch.object(host.pwd,'getpwnam',return_value=type('User',(),{'pw_uid':1000})()), \
+                 patch.object(host,'run'):
+                host.authorize_start(state,'labowner')
+                self.assertEqual(policy.read_text(),'labowner ALL=(root) NOPASSWD: /usr/bin/systemctl start virtlogd.socket virtlockd.socket libvirtd.socket\n')
+                host.authorize_start(state,'ciuser')
+                self.assertTrue(policy.read_text().startswith('ciuser ALL='))
+                self.assertEqual(state['user'],'labowner')
+                self.assertEqual(state['startup_user'],'ciuser')
+                self.assertEqual(policy.stat().st_mode & 0o777,0o440)
+                policy.chmod(0o600)
+                policy.write_text('Unrelated administrator policy')
+                with self.assertRaisesRegex(RuntimeError,'differs'):
+                    host.authorize_start(state,'labowner')
+
+    def test_start_authorization_rejects_root_and_uninstalled_host(self):
+        with self.assertRaisesRegex(RuntimeError,'install'):
+            host.authorize_start({},'ciuser')
+        with patch.object(host.pwd,'getpwnam',return_value=type('User',(),{'pw_uid':0})()):
+            with self.assertRaisesRegex(RuntimeError,'Invalid'):
+                host.authorize_start({'phase':'installed'},'root')
+
     def test_purge_refuses_removing_a_later_dependent_package(self):
         with self.assertRaisesRegex(RuntimeError, 'unowned'):
             host.check_purge('Purg libvirt-clients [8.0]\nRemv another-project [1.0]\n', {'libvirt-clients'})
@@ -624,6 +661,38 @@ class HostSafetyTest(unittest.TestCase):
 
 
 class VmSafetyTest(unittest.TestCase):
+    def test_completed_cloud_init_with_warnings_still_checks_kubernetes(self):
+        responses=[subprocess.CompletedProcess([],2,json.dumps({'status':'done','errors':[]})),
+                   subprocess.CompletedProcess([],0,'ok\n')]
+        with patch.object(vm,'pin_guest_key',return_value=True), \
+             patch.object(vm,'stage_k3s'), patch.object(vm,'ssh',side_effect=responses) as ssh, \
+             patch.object(vm.time,'sleep',side_effect=AssertionError('Ready guest must not keep waiting')):
+            vm.ready()
+            self.assertEqual(ssh.call_args.args[0],'sudo k3s kubectl get --raw=/readyz')
+
+    def test_cloud_init_failure_is_reported_without_waiting_for_timeout(self):
+        response=subprocess.CompletedProcess([],1,json.dumps({'status':'error','errors':['bootstrap failed']}))
+        with patch.object(vm,'pin_guest_key',return_value=True), patch.object(vm,'stage_k3s'), \
+             patch.object(vm,'ssh',return_value=response), \
+             patch.object(vm.time,'sleep',side_effect=AssertionError('Failed bootstrap must stop immediately')):
+            with self.assertRaisesRegex(RuntimeError,'cloud-init failed'):
+                vm.ready()
+
+    def test_kvm_support_uses_libvirt_without_opening_the_raw_device(self):
+        xml='<domainCapabilities><domain>kvm</domain><arch>x86_64</arch></domainCapabilities>'
+        with patch.object(vm,'virsh',return_value=subprocess.CompletedProcess([],0,xml)) as virsh, \
+             patch('builtins.open',side_effect=AssertionError('No raw host device access')):
+            vm.require_kvm()
+            virsh.assert_called_once_with('domcapabilities','--virttype','kvm','--arch','x86_64')
+
+    def test_missing_or_wrong_kvm_capability_is_rejected(self):
+        for xml in ('<domainCapabilities/>',
+                    '<domainCapabilities><domain>qemu</domain><arch>x86_64</arch></domainCapabilities>',
+                    '<domainCapabilities><domain>kvm</domain><arch>aarch64</arch></domainCapabilities>'):
+            with patch.object(vm,'virsh',return_value=subprocess.CompletedProcess([],0,xml)):
+                with self.assertRaisesRegex(RuntimeError,'does not support'):
+                    vm.require_kvm()
+
     def test_lifecycle_pause_discards_the_guest_producer_instead_of_queueing_frames(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
@@ -837,3 +906,72 @@ class VmSafetyTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OptionalInfrastructureTest(unittest.TestCase):
+    def test_domain_only_shutdown_keeps_network_and_storage_active(self):
+        resources = {key: {} for key in ('libvirt_domain.lab', 'libvirt_network.lab', 'libvirt_pool.lab')}
+        with patch.object(vm, 'ownership', return_value=resources), patch.object(vm, 'run'), \
+             patch.object(vm, 'no_autostart'), patch.object(vm, 'virsh', side_effect=[
+                 subprocess.CompletedProcess([], 0, 'running\n'),
+                 subprocess.CompletedProcess([], 0, ''),
+                 subprocess.CompletedProcess([], 0, 'shut off\n')]) as virsh:
+            vm.stop(keep_infrastructure=True)
+            self.assertEqual([call.args[0] for call in virsh.call_args_list], ['domstate', 'shutdown', 'domstate'])
+
+    def test_existing_disks_do_not_require_space_for_another_guest(self):
+        from types import SimpleNamespace
+        with patch.object(vm, 'require_kvm'), patch.object(vm, 'overlap'), \
+             patch.object(vm, 'virsh', return_value=subprocess.CompletedProcess([], 0, '')), \
+             patch.object(vm, 'run', return_value=subprocess.CompletedProcess([], 0, '[]')), \
+             patch.object(vm.shutil, 'which', return_value=None), \
+             patch.object(vm.shutil, 'disk_usage', return_value=SimpleNamespace(free=10 * 1024 ** 3)), \
+             patch.object(Path, 'read_text', return_value='MemAvailable: 262144 kB\n'):
+            with self.assertRaisesRegex(RuntimeError, '50 GiB'):
+                vm.preflight({})
+            vm.preflight({'libvirt_volume.' + name: {} for name in ('base', 'system', 'bootstrap')})
+
+    def test_domain_update_requires_successful_graceful_stop_before_apply(self):
+        plan={'resource_changes':[{'address':'libvirt_domain.lab','change':{'actions':['update']}}]}
+        for stop_fails in (False, True):
+            events=[]
+            def terraform(*args, **kwargs):
+                events.append(args[0])
+                return json.dumps(plan) if args[0]=='show' else None
+            def stop(*, keep_infrastructure):
+                self.assertTrue(keep_infrastructure)
+                events.append('stop')
+                if stop_fails: raise RuntimeError('Guest did not shut down')
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.object(vm,'VM',Path(directory)), patch.object(vm,'ownership',return_value={'libvirt_domain.lab':{}}), \
+                 patch.object(vm,'is_ready',return_value=False), patch.object(vm,'preflight'), \
+                 patch.object(vm,'prepare'), patch.object(vm,'init'), patch.object(vm,'no_autostart'), \
+                 patch.object(vm,'ready'), patch.object(vm,'kubeconfig'), \
+                 patch.object(vm,'virsh',return_value=subprocess.CompletedProcess([],0,'running\n')), \
+                 patch.object(vm,'terraform',side_effect=terraform), patch.object(vm,'stop',side_effect=stop):
+                if stop_fails:
+                    with self.assertRaisesRegex(RuntimeError,'did not shut down'): vm.start()
+                    self.assertNotIn('apply',events)
+                else:
+                    vm.start()
+                    self.assertLess(events.index('stop'),events.index('apply'))
+
+    def test_running_healthy_guest_still_reconciles_terraform_without_restart(self):
+        plan={'resource_changes':[{'address':'libvirt_domain.lab','change':{'actions':['no-op']}}]}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(vm,'VM',Path(directory)), patch.object(vm,'ownership',return_value={'libvirt_domain.lab':{}}), \
+             patch.object(vm,'is_ready',return_value=True), patch.object(vm,'preflight'), \
+             patch.object(vm,'prepare'), patch.object(vm,'init'), patch.object(vm,'no_autostart'), \
+             patch.object(vm,'ready'), patch.object(vm,'kubeconfig'), patch.object(vm,'stop') as stop, \
+             patch.object(vm,'terraform',side_effect=lambda *a,**kw: json.dumps(plan) if a[0]=='show' else None) as terraform:
+            vm.start()
+            self.assertIn('plan',[call.args[0] for call in terraform.call_args_list])
+            self.assertIn('apply',[call.args[0] for call in terraform.call_args_list])
+            stop.assert_not_called()
+
+    def test_deployment_check_never_starts_missing_guest(self):
+        with patch.object(vm,'ownership',return_value={}), patch.object(vm,'start') as start, \
+             patch.object(vm,'prepare') as prepare:
+            with self.assertRaisesRegex(RuntimeError,'optional manual infra:start'):
+                vm.require_ready()
+            start.assert_not_called();prepare.assert_not_called()

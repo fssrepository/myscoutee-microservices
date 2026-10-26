@@ -1,0 +1,17 @@
+{
+  "project": "myscoutee-microservices",
+  "type": "source",
+  "depends_on": [],
+  "variables": {
+    "LAB_GITHUB_REPOSITORY": "fssrepository/myscoutee-microservices"
+  },
+  "release_notes": "guides/releases/v{version}.md",
+  "terraform_module": {
+    "name": "labkvm",
+    "system": "libvirt",
+    "directory": "infra",
+    "subdirectory": "terraform",
+    "version": "1.5.0"
+  },
+  "release_name": "MyScoutee Microservices"
+}

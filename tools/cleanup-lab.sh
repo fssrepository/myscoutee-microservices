@@ -13,11 +13,11 @@ if command -v virsh >/dev/null; then
   python3 "${tools_root}/vm.py" destroy
 else
   # A missing libvirt tool is not permission to erase a resource inventory.
-  python3 - "${state_root}/vm/terraform.tfstate" <<'PY'
-import json, sys
+  PYTHONPATH="${support_root}/tools${PYTHONPATH:+:$PYTHONPATH}" python3 - "${state_root}/vm/terraform.tfstate" <<'PY'
+import sys
 from pathlib import Path
-state = Path(sys.argv[1])
-if state.exists() and json.loads(state.read_text()).get('resources'):
+from terraform_state import read_state
+if read_state(Path(sys.argv[1])).get('resources'):
     raise SystemExit('Restore host tooling before destroying recorded VM resources; state preserved.')
 PY
 fi

@@ -54,7 +54,7 @@ def kube_json(*args):
 
 def image_lock():
     manifest = json.loads(LOCK.read_text())
-    if manifest.get('schemaVersion') != 1 or set(manifest['images']) != set(SERVICES) | set(CONFIG['dependencies']):
+    if manifest.get('schemaVersion') != 1 or set(manifest['images']) != set(SERVICES) | set(CONFIG['dependencies']) | set(CONFIG.get('volumeImages', {})):
         raise RuntimeError('Image lock does not match current assembly/dependency inventory.')
     for name, entry in manifest['images'].items():
         expected = 'docker.io/library/' + IMAGES['prefix'] + name + ':' + IMAGES['immutableVersion'] + '-' + entry['id'].removeprefix('sha256:')[:12]
@@ -67,6 +67,7 @@ def lock_images():
     images = {}
     sources = {name: IMAGES['prefix'] + name + ':' + IMAGES['buildTag'] for name in SERVICES}
     sources.update(CONFIG['dependencies'])
+    sources.update(CONFIG.get('volumeImages', {}))
     for name, source in sources.items():
         info = json.loads(vm.run('docker', 'image', 'inspect', source).stdout)[0]
         fingerprint = vm.run(PACKAGING / 'release/lib/image-content-fingerprint.sh', 'docker', source).stdout.strip()
@@ -309,11 +310,13 @@ def chart_values(backends_enabled=True, *, credentials=None, cluster_dns=None, r
     credentials = secrets_data() if credentials is None else credentials
     capabilities = transport_credentials_by_service(SERVICES, backend)
     delegation = actor_delegation_settings(SERVICES, credentials, capabilities)
+    from seed_mongo import seed_policy
     return {
         'images': image_lock(),
         'releaseSimulatorCertificate': ((release_simulator_certificate() if backends_enabled else '')
                                         if release_certificate is None else release_certificate),
-        'mongodb': {'replicaSet': CONFIG.get('mongoReplicaSet', False), 'cpuLimit': str(CONFIG.get('mongoCpuLimit', 2))},
+        'mongodb': {'replicaSet': CONFIG.get('mongoReplicaSet', False), 'cpuLimit': str(CONFIG.get('mongoCpuLimit', 2)),
+                    'seedAllowedCollections': seed_policy(backend)},
         'services': {name: {**config, 'replicas': 1 if backends_enabled else 0} for name, config in SERVICES.items()},
         'frontend': {'replicas': CONFIG['frontendReplicas'], 'nodePort': CONFIG['frontendNodePort']},
         'metricsNodePort': CONFIG['metricsNodePort'],
@@ -338,7 +341,6 @@ def chart_values(backends_enabled=True, *, credentials=None, cluster_dns=None, r
             'publicUpstreamRoutes': '\n        '.join(route['pattern'] + ' ' + route['service'] + '.' + NAMESPACE + '.svc.cluster.local:8080;' for route in CONFIG['publicRoutes']),
             'metricsUpstreamRoutes': '\n'.join('/metrics/' + name + ' ' + name + '.' + NAMESPACE + '.svc.cluster.local:8081;' for name in SERVICES),
             'runtimeStatusLocation': (backend / 'config/nginx/http/runtime-status.conf').read_text(),
-            'mongoInitScript': (backend / 'server/docker/conf/mongodb/db_init.js').read_text(),
             'responsePolicy': (backend / 'config/nginx/http/https-response-policy.prod.conf').read_text()}}
 
 
@@ -352,7 +354,7 @@ def chart_objects():
             *mongo, ('Secret', 'actor-delegation-issuer'), ('Secret', 'deployment-configuration'),
             *[('Secret', 'transport-' + name) for name in SERVICES],
             ('ServiceAccount', 'runtime-status'), ('Role', 'runtime-status'), ('RoleBinding', 'runtime-status'),
-            ('ConfigMap', 'runtime'), ('ConfigMap', 'mongodb-init'), ('ConfigMap', 'frontend'), ('ConfigMap', 'release-simulator-ca'),
+            ('ConfigMap', 'runtime'), ('ConfigMap', 'frontend'), ('ConfigMap', 'release-simulator-ca'),
             ('Service', 'metrics-gateway'), ('PersistentVolumeClaim', 'frontend-nginx-state'), ('PersistentVolumeClaim', 'minio'),
             ('PersistentVolumeClaim', 'release-simulator'),
             *([('PersistentVolumeClaim', 'registry'), ('PersistentVolumeClaim', 'registry-client')] if 'registry' in CONFIG['dependencies'] else []),
@@ -496,8 +498,11 @@ def deploy_chart(check_only=False, backends_enabled=True):
     migrate_mongo_member_services(mongo_service_migrations)
     for name, migration in secret_migrations:
         kube('-n', NAMESPACE, 'patch', 'secret', name, '--type=json', '-p', json.dumps(migration))
+    rollout_timeout = CONFIG.get('rolloutTimeoutSeconds', 90)
+    print(f'Waiting up to {rollout_timeout}s for workload readiness (including first-start data initialization).', flush=True)
     result = helm('upgrade', '--install', NAMESPACE, chart, '-n', NAMESPACE, '-f', '-',
-                  '--server-side=false', '--history-max=3', '--wait=watcher', '--timeout=90s', values=values, check=False)
+                  '--server-side=false', '--history-max=3', '--wait=watcher', f'--timeout={rollout_timeout}s',
+                  values=values, timeout=rollout_timeout + 30, check=False)
     if result.returncode:
         status()
         raise RuntimeError('Helm rollout failed or timed out; resources retained for diagnosis. Inspect workload status/logs. No application-ready claim.')

@@ -12,5 +12,24 @@
     "version": "v1.37.1+k3s1",
     "url": "https://github.com/k3s-io/k3s/releases/download/v1.37.1+k3s1/k3s",
     "sha256": "92b94582eb7b34a8cf532e6006842b9ed215a6783cf56a3dd6271fd35243b2c0"
+  },
+  "k3sAirgap": {
+    "version": "v1.37.1+k3s1",
+    "url": "https://github.com/k3s-io/k3s/releases/download/v1.37.1%2Bk3s1/k3s-airgap-images-amd64.tar.zst",
+    "sha256": "865b2a63ad7a63fc0db17b7fc2985bf4ae11d5ae93ca1472be6218d20aeb6b23"
+  },
+  "guestPackages": {
+    "liburing2_2.5-1build1_amd64.deb": {
+      "package": "liburing2",
+      "version": "2.5-1build1",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libu/liburing/liburing2_2.5-1build1_amd64.deb",
+      "sha256": "c2aef62accee92a06263c3ad4ef46132c13e409b54296c44792a20491830a7b0"
+    },
+    "qemu-guest-agent_8.2.2+ds-0ubuntu1.16_amd64.deb": {
+      "package": "qemu-guest-agent",
+      "version": "1:8.2.2+ds-0ubuntu1.16",
+      "url": "https://security.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-guest-agent_8.2.2+ds-0ubuntu1.16_amd64.deb",
+      "sha256": "e24b22c37b3011e9ca3fe063c1e75c28690bab9deef2a1bc56478303a01c83b2"
+    }
   }
 }

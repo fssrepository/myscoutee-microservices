@@ -3,10 +3,21 @@
 set -euo pipefail
 [[ "${EUID}" == 0 ]] || { echo 'Guest provisioning requires root.' >&2; exit 2; }
 python3 - <<'PY'
-import hashlib, json, os, urllib.request
+import hashlib, json, os, time, urllib.request
 from pathlib import Path
-artifact = json.loads(Path('/etc/myscoutee-lab/versions.json').read_text())['k3s']
+versions = json.loads(Path('/etc/myscoutee-lab/versions.json').read_text())
+artifact = versions['k3s']
 target = Path('/usr/local/bin/k3s')
+if os.environ.get('MYSCOUTEE_K3S_HOST_STAGED') == 'true':
+    # The existing authenticated SSH transport supplies files from GitLab.
+    # No credential, proxy or additional download service is installed here.
+    archive = Path('/var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst')
+    expected = [(target, artifact['sha256']), (archive, versions['k3sAirgap']['sha256'])]
+    deadline = time.monotonic() + 300
+    while not all(p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest() == checksum for p, checksum in expected):
+        if time.monotonic() >= deadline:
+            raise SystemExit('Pinned k3s inputs were not supplied by the infrastructure job; no external download attempted.')
+        time.sleep(2)
 if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != artifact['sha256']:
     temporary = target.with_suffix('.download')
     with urllib.request.urlopen(artifact['url'], timeout=120) as source, temporary.open('wb') as output:

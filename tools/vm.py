@@ -25,6 +25,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from runtime_config import SHELL, SUPPORT, BUILD, BACKEND, CONFIG, LAB, STATE
+import terraform_state
 VM = STATE / 'vm'
 NAME = LAB['vmName']
 CIDR = LAB['networkCidr']
@@ -67,15 +68,13 @@ def terraform(*args, capture=False):
 
 
 def init():
-    terraform('init', '-input=false', '-reconfigure', '-lockfile=readonly',
-              '-backend-config=path=' + str(VM / 'terraform.tfstate'))
+    arguments=[] if terraform_state.remote() else ['-backend-config=path=' + str(VM / 'terraform.tfstate')]
+    terraform('init', '-input=false', '-reconfigure', '-lockfile=readonly', *arguments)
 
 
 def state_resources():
     state = VM / 'terraform.tfstate'
-    if not state.exists():
-        return {}
-    raw = json.loads(state.read_text())
+    raw = terraform_state.read_state(state)
     resources = {}
     for resource in raw.get('resources', []):
         address = resource['type'] + '.' + resource['name']
@@ -125,10 +124,16 @@ def overlap(routes, owned_bridge=False):
             raise RuntimeError('Lab subnet overlaps an existing route/network: ' + destination)
 
 
-def preflight(resources, host_reserve_mib=2048):
-    with open('/dev/kvm', 'rb+') as kvm:
-        if fcntl.ioctl(kvm, 0xAE00, 0) != 12:
-            raise RuntimeError('Unsupported KVM API.')
+def require_kvm():
+    # libvirt's QEMU process opens /dev/kvm. The CI management account only
+    # needs its existing authenticated libvirt connection, not raw device access.
+    capabilities = ET.fromstring(virsh('domcapabilities', '--virttype', 'kvm', '--arch', 'x86_64').stdout)
+    if capabilities.findtext('domain') != 'kvm' or capabilities.findtext('arch') != 'x86_64':
+        raise RuntimeError('The system libvirt connection does not support the required x86_64 KVM guest.')
+
+
+def preflight(resources):
+    require_kvm()
     overlap(json.loads(run('ip', '-json', '-4', 'route', 'show', 'table', 'all').stdout),
             owned_bridge='libvirt_network.lab' in resources)
     for name in virsh('net-list', '--all', '--name').stdout.split():
@@ -152,17 +157,10 @@ def preflight(resources, host_reserve_mib=2048):
     processes = run('ps', '-eo', 'args=').stdout
     if any(word in processes for word in ('org.gradle.launcher.daemon', 'bootRun', 'frontend_auto_watch', 'ng serve')):
         raise RuntimeError('A dev/build owner is still running. Run builds and VM startup serially.')
-    running = False
-    if 'libvirt_domain.lab' in resources:
-        running = virsh('domstate', NAME, check=False).stdout.strip() == 'running'
     memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
     available = int(memory['MemAvailable'].split()[0]) // 1024
-    # A running guest already owns its current allocation; reserve only growth.
-    additional = max(0, MEMORY_MIB - int(resources["libvirt_domain.lab"]["memory"])) if running else MEMORY_MIB
-    required = host_reserve_mib + additional
-    if available < required:
-        raise RuntimeError(f'Need {required} MiB currently available (including {host_reserve_mib} MiB host reserve); found {available}.')
-    if shutil.disk_usage('/var/lib/libvirt/images').free < 50 * 1024 ** 3:
+    existing_disks = all('libvirt_volume.' + name in resources for name in ('base', 'system', 'bootstrap'))
+    if not existing_disks and shutil.disk_usage('/var/lib/libvirt/images').free < 50 * 1024 ** 3:
         raise RuntimeError('Need 50 GiB free for the sparse 40-GiB guest and image staging.')
     print(f'Preflight passed: {available} MiB available; no subnet collision; KVM ready.')
 
@@ -175,6 +173,8 @@ def prepare():
         with path.open('rb') as stream:
             return hashlib.file_digest(stream, 'sha256').hexdigest() if hasattr(hashlib, 'file_digest') else stream_hash(stream)
     if not image.exists() or digest(image) != artifact['sha256']:
+        if os.environ.get('MYSCOUTEE_INFRA_OFFLINE') == 'true':
+            raise RuntimeError('Pinned Ubuntu image is missing. Run the optional manual infrastructure preparation job.')
         temporary = image.with_suffix('.download')
         with urllib.request.urlopen(artifact['url'], timeout=60) as source, temporary.open('wb') as out:
             shutil.copyfileobj(source, out, 1024 * 1024)
@@ -182,16 +182,37 @@ def prepare():
             temporary.unlink()
             raise RuntimeError('Ubuntu image checksum mismatch.')
         temporary.replace(image)
+    # The pinned cloud image already supplies curl, CA certificates and Python.
+    # Only its missing guest-agent packages are added; cloud-init never runs apt.
+    packages = STATE / 'tools/guest-packages'
+    packages.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name, artifact in versions['guestPackages'].items():
+        package = packages / name
+        if package.is_file() and digest(package) == artifact['sha256']:
+            continue
+        if os.environ.get('MYSCOUTEE_INFRA_OFFLINE') == 'true':
+            raise RuntimeError('Pinned guest package is missing or corrupt: ' + name + '. Run optional infrastructure preparation.')
+        temporary = package.with_suffix('.download')
+        try:
+            with urllib.request.urlopen(artifact['url'], timeout=60) as source, temporary.open('wb') as out:
+                shutil.copyfileobj(source, out)
+            if digest(temporary) != artifact['sha256']:
+                raise RuntimeError('Guest package checksum mismatch: ' + name)
+            temporary.replace(package)
+        finally:
+            temporary.unlink(missing_ok=True)
     key = VM / 'id_ed25519'
     if not key.exists():
-        if (VM / 'terraform.tfstate').exists() or (VM / 'known_hosts').exists():
+        if state_resources() or (VM / 'known_hosts').exists():
             raise RuntimeError('Existing VM lost its key; do not silently replace its access identity.')
         run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', NAME, '-f', key)
     # Rebuild public material from the private key, never rotate on an ordinary start.
     key.with_suffix('.pub').write_text(run('ssh-keygen', '-y', '-f', key).stdout)
-    variables = dict(verified_cloud_image=str(image), ssh_public_key_file=str(key.with_suffix('.pub')),
+    variables = dict(verified_cloud_image=str(image), guest_package_directory=str(packages), ssh_public_key_file=str(key.with_suffix('.pub')),
                      network_cidr=CIDR, memory_mib=MEMORY_MIB, running=True,
                      lab_name=NAME, bridge_name=LAB['bridge'], mac_address=LAB['macAddress'])
+    if os.environ.get('MYSCOUTEE_INFRA_OFFLINE') == 'true':
+        variables['k3s_host_staged'] = True
     (VM / 'inputs.tfvars.json').write_text(json.dumps(variables, indent=2) + '\n')
 
 
@@ -450,24 +471,64 @@ def pin_guest_key():
     return False
 
 
+def stage_k3s():
+    """Copy pinned GitLab inputs over the existing authenticated SSH transport."""
+    versions=json.loads((SUPPORT/'infra/versions.json').read_text())
+    files=[('k3s','/usr/local/bin/k3s','0755'),
+           ('k3sAirgap','/var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst','0644')]
+    for key,destination,mode in files:
+        local=STATE/'tools'/Path(destination).name
+        expected=versions[key]['sha256']
+        if not local.is_file(): raise RuntimeError('Missing staged '+key+'; run optional infrastructure preparation.')
+        with local.open('rb') as stream:
+            if stream_hash(stream)!=expected: raise RuntimeError('Staged '+key+' checksum mismatch.')
+        current=ssh('sudo sha256sum '+shlex.quote(destination),check=False)
+        if current.returncode==0 and current.stdout.split()[0]==expected: continue
+        directory=str(Path(destination).parent)
+        temporary=destination+'.incoming'
+        ssh('sudo install -d -m 0755 '+shlex.quote(directory))
+        with local.open('rb') as stream:
+            subprocess.run(ssh_command('sudo sh -c '+shlex.quote('umask 077; cat > '+shlex.quote(temporary))),
+                           stdin=stream,check=True,timeout=300)
+        if ssh('sudo sha256sum '+shlex.quote(temporary)).stdout.split()[0]!=expected:
+            raise RuntimeError('Guest '+key+' checksum mismatch; refusing installation.')
+        ssh('sudo chmod '+mode+' '+shlex.quote(temporary)+' && sudo mv '+shlex.quote(temporary)+' '+shlex.quote(destination))
+    print('Pinned k3s binary and offline images delivered from the local registry cache.')
+
+
 def ready():
     deadline = time.monotonic() + 600
+    staged=False
+    progress=0
+    phase='QEMU guest agent (guest bootstrap and OS package installation)'
     while time.monotonic() < deadline:
+        if time.monotonic() >= progress:
+            print('Waiting for '+phase+'; no interactive password input is used.',flush=True)
+            progress=time.monotonic()+30
         if not pin_guest_key():
             time.sleep(5)
             continue
+        phase='cloud-init completion and Kubernetes API readiness'
+        if os.environ.get('MYSCOUTEE_INFRA_OFFLINE') == 'true' and not staged:
+            print('Delivering pinned k3s files over authenticated SSH.',flush=True)
+            stage_k3s()
+            staged=True
         result = ssh('sudo cloud-init status --format json', check=False)
-        if result.returncode == 0:
+        if result.returncode in (0, 1, 2):
             status = json.loads(result.stdout)
-            if status.get('status') == 'done':
+            if status.get('status') == 'error' or status.get('errors'):
+                raise RuntimeError('Guest cloud-init failed; inspect with vm.py ssh. VM retained for diagnosis.')
+            # cloud-init uses exit 2 for completed runs with recoverable
+            # warnings. Still require successful Kubernetes readiness.
+            if status.get('status') == 'done' and result.returncode in (0, 2):
+                if result.returncode == 2:
+                    print('Guest cloud-init completed with warnings; inspect cloud-init status for details.',flush=True)
                 health = ssh('sudo k3s kubectl get --raw=/readyz', check=False)
                 if health.returncode == 0 and health.stdout.strip() == 'ok':
                     print('Guest cloud-init completed and k3s API is ready.')
                     return
-            if status.get('status') == 'error':
-                raise RuntimeError('Guest cloud-init failed; inspect with vm.py ssh. VM retained for diagnosis.')
         time.sleep(5)
-    raise RuntimeError('Guest not ready in 10 minutes. VM retained for diagnosis; no blind recreation.')
+    raise RuntimeError('Guest not ready in 10 minutes; waiting for '+phase+'. VM retained for diagnosis; no blind recreation.')
 
 
 def kubeconfig():
@@ -478,9 +539,25 @@ def kubeconfig():
     print('Private kubeconfig saved at ' + str(VM / 'kubeconfig'))
 
 
-def start(host_reserve_mib=2048):
+def is_ready(resources):
+    """Inspect the owned guest without starting or provisioning anything."""
+    if 'libvirt_domain.lab' not in resources:
+        return False
+    if virsh('domstate', NAME).stdout.strip() != 'running' or not (VM / 'known_hosts').is_file():
+        return False
+    health = ssh('sudo k3s kubectl get --raw=/readyz', check=False)
+    return health.returncode == 0 and health.stdout.strip() == 'ok'
+
+
+def require_ready():
+    if not is_ready(ownership()):
+        raise RuntimeError('KVM infrastructure is not ready. Check or run the optional manual infra:start job, then retry deployment.')
+    print('KVM guest and Kubernetes API are ready; no startup or provisioning needed.')
+
+
+def start():
     resources = ownership()
-    preflight(resources, host_reserve_mib)
+    preflight(resources)
     no_autostart(resources)
     prepare()
     init()
@@ -492,8 +569,14 @@ def start(host_reserve_mib=2048):
                 virsh(prefix + 'start', NAME)
     plan = VM / 'start.tfplan'
     terraform('plan', '-input=false', '-var-file=' + str(VM / 'inputs.tfvars.json'), '-out=' + str(plan))
-    check_plan(json.loads(terraform('show', '-json', plan, capture=True)))
+    changes = json.loads(terraform('show', '-json', plan, capture=True))
+    check_plan(changes)
     try:
+        if any(change['address'] == 'libvirt_domain.lab' and change['change']['actions'] == ['update']
+               for change in changes.get('resource_changes', [])) and virsh('domstate', NAME).stdout.strip() == 'running':
+            # The provider otherwise force-stops after its short shutdown wait.
+            # Reuse the owner's graceful stop; a timeout must retain the guest.
+            stop(keep_infrastructure=True)
         terraform('apply', '-input=false', plan)
     finally:
         no_autostart(ownership())
@@ -502,7 +585,7 @@ def start(host_reserve_mib=2048):
     kubeconfig()
 
 
-def stop():
+def stop(keep_infrastructure=False):
     resources = ownership()
     # Reuse the workload transport's exact endpoint/process ownership checks.
     # No lifecycle lock is reacquired by this action, including after VM failure.
@@ -519,6 +602,8 @@ def stop():
                 time.sleep(2)
             else:
                 raise RuntimeError('Guest did not shut down; retained it instead of forcing power loss.')
+    if keep_infrastructure:
+        return
     for kind, prefix in (('network', 'net-'), ('pool', 'pool-')):
         if 'libvirt_' + kind + '.lab' in resources:
             info = virsh(prefix + 'info', NAME, check=False)
@@ -606,15 +691,11 @@ def require_libvirt_access():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['preflight', 'prepare', 'start', 'stop', 'destroy', 'status', 'kubeconfig', 'ssh', 'observe', 'console'])
+    parser.add_argument('action', choices=['preflight', 'prepare', 'start', 'ready', 'stop', 'destroy', 'status', 'kubeconfig', 'ssh', 'observe', 'console'])
     parser.add_argument('--once', action='store_true', help='Print one observe snapshot and exit.')
-    parser.add_argument('--host-reserve-mib', type=int, default=2048,
-                        help='Explicit per-invocation host reserve for start/preflight; never changes guest RAM.')
     args = parser.parse_args()
     if args.once and args.action != 'observe':
         parser.error('--once applies only to observe.')
-    if args.host_reserve_mib < 0 or (args.host_reserve_mib != 2048 and args.action not in ('start', 'preflight')):
-        parser.error('--host-reserve-mib must be nonnegative and applies only to start/preflight.')
     if os.geteuid() == 0:
         parser.error('Run as the lab user, not root. Host operations use host.py separately.')
     if args.action != 'prepare':
@@ -628,11 +709,13 @@ def main():
     with (VM / 'lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == 'preflight':
-            preflight(ownership(), args.host_reserve_mib)
+            preflight(ownership())
         elif args.action == 'prepare':
             prepare()
         elif args.action == 'start':
-            start(args.host_reserve_mib)
+            start()
+        elif args.action == 'ready':
+            require_ready()
         elif args.action == 'stop':
             stop()
         elif args.action == 'destroy':

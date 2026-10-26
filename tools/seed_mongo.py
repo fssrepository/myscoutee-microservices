@@ -30,8 +30,7 @@ IMPORT_FILES = ('mongo_import.sh', 'mongo-seed-policy.inc')
 SEED_CONFIG = json.loads((w.SHELL / 'seed.json').read_text())
 
 
-def seed_bundle(backend):
-    source = backend / 'server/docker/conf/mongodb'
+def seed_policy(backend):
     # The production Compose env is the allowlist owner. No copy of the list here.
     lines = (backend / 'server/.env').read_text().splitlines()
     rule = next(line.split('=', 1)[1] for line in lines
@@ -39,7 +38,12 @@ def seed_bundle(backend):
     rules = dict(item.split(':', 1) for item in rule.split(';'))
     if not rules.get('myscoutee_db') or rules['myscoutee_db'] == '*' or rules.get('demo_db') != '*':
         raise RuntimeError('Review changed canonical production/DEMO seed policy before lab bootstrap.')
-    allowlist = ';'.join(database + ':' + rules[directory] for database, directory in DATABASES.items())
+    return ';'.join(database + ':' + rules[directory] for database, directory in DATABASES.items())
+
+
+def seed_bundle(backend):
+    source = backend / 'server/docker/conf/mongodb'
+    allowlist = seed_policy(backend)
     files = {name: source / name for name in IMPORT_FILES}
     for directory in DATABASES.values():
         for path in sorted((source / directory).glob('*.json')):

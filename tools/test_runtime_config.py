@@ -11,7 +11,10 @@ import workloads
 
 
 class RuntimeConfigTest(unittest.TestCase):
-    def test_explicit_chart_inputs_do_not_contact_runtime_or_open_lab_credentials(self):
+    # Image inventories are build outputs. Their validation is covered by the
+    # seed-volume/lock tests; composition tests must not require a prior build.
+    @patch.object(workloads, 'image_lock', return_value={'fixture': {'reference': 'fixture@sha256:example'}})
+    def test_explicit_chart_inputs_do_not_contact_runtime_or_open_lab_credentials(self, images):
         credentials = {'delegationClient-' + name: 'analysis-placeholder'
                        for name, service in workloads.SERVICES.items()
                        if 'accounts' not in service['domains']}
@@ -22,11 +25,13 @@ class RuntimeConfigTest(unittest.TestCase):
             values = workloads.chart_values(credentials=credentials, cluster_dns='192.0.2.53',
                                              release_certificate='analysis-certificate')
         self.assertIs(values['credentials'], credentials)
+        self.assertIs(values['images'], images.return_value)
         self.assertEqual(values['clusterDns'], '192.0.2.53')
         self.assertEqual(values['releaseSimulatorCertificate'], 'analysis-certificate')
         self.assertEqual(set(values['services']), set(workloads.SERVICES))
 
-    def test_chart_default_runtime_providers_match_explicit_inputs(self):
+    @patch.object(workloads, 'image_lock', return_value={'fixture': {'reference': 'fixture@sha256:example'}})
+    def test_chart_default_runtime_providers_match_explicit_inputs(self, images):
         credentials = {'delegationClient-' + name: 'analysis-placeholder'
                        for name, service in workloads.SERVICES.items()
                        if 'accounts' not in service['domains']}
@@ -58,6 +63,25 @@ class RuntimeConfigTest(unittest.TestCase):
         config['databases']['demo'] = config['databases']['real']
         with self.assertRaisesRegex(ValueError, 'distinct'):
             runtime.validate(config)
+
+    def test_vm_memory_keeps_the_project_value_without_lab_caps(self):
+        for value in (2048, 6144, 8192, 16384):
+            config = copy.deepcopy(runtime.CONFIG)
+            config['lab']['memoryMiB'] = value
+            self.assertEqual(runtime.validate(config)['lab']['memoryMiB'], value)
+        for value in (0, -1, True, 1.5, '8192'):
+            config['lab']['memoryMiB'] = value
+            with self.assertRaisesRegex(ValueError, 'positive integer'):
+                runtime.validate(config)
+
+    def test_rollout_timeout_is_bounded_and_allows_first_start_import(self):
+        for value in (True, 0, -1, 1801, '600'):
+            config = copy.deepcopy(runtime.CONFIG)
+            config['rolloutTimeoutSeconds'] = value
+            with self.assertRaisesRegex(ValueError, 'rolloutTimeoutSeconds'):
+                runtime.validate(config)
+        config['rolloutTimeoutSeconds'] = 600
+        self.assertEqual(runtime.validate(config)['rolloutTimeoutSeconds'], 600)
 
     def test_vm_network_rejects_public_loopback_and_link_local_subnets(self):
         for value in ('8.8.8.0/24', '127.0.0.0/24', '169.254.1.0/24', '192.168.173.0/25'):

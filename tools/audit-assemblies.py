@@ -197,11 +197,17 @@ def injected_inventory(assembly, owners):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--artifacts', action='store_true')
+    parser.add_argument('--services', help='Audit only these comma-separated assembly names')
     args = parser.parse_args()
     services, owners = configuration()
+    selected = set(args.services.split(',')) if args.services else set(services)
+    if not selected <= set(services):
+        parser.error('Unknown assembly selection')
     report = {'issue': json.loads((SHELL / 'assemblies.json').read_text())['issue'], 'runtimeVerified': False, 'services': {}}
     transport_usage = usage(SHELL, BACKEND) if args.artifacts else {}
     for name, assembly in services.items():
+        if name not in selected:
+            continue
         details = {'domains': assembly['domains'], 'candidateRemoteContracts': inventory(assembly, owners),
                    'unboundInjectedApiCandidates': injected_inventory(assembly, owners)}
         if args.artifacts:

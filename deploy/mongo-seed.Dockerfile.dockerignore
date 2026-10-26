@@ -1,0 +1,8 @@
+*
+!db_init.js
+!mongo_import.sh
+!mongo-seed-policy.inc
+!myscoutee_db/
+!myscoutee_db/*.json
+!demo_db/
+!demo_db/*.json

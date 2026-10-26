@@ -135,6 +135,17 @@ spec:
         envFrom:
         - secretRef:
             name: mongodb-bootstrap
+        env:
+        - name: MONGO_INITDB_DATABASE
+          value: {{ .Values.databases.real | quote }}
+        - name: MONGO_APP_DATABASE
+          value: {{ .Values.databases.real | quote }}
+        - name: MONGO_SEED_DIRECTORY
+          value: myscoutee_db
+        - name: MONGO_IMPORT_ALL_SEED_DATABASES
+          value: "true"
+        - name: MONGO_IMPORT_ALLOWED_COLLECTIONS_BY_DB
+          value: {{ required "Mongo production seed collection policy is required" .Values.mongodb.seedAllowedCollections | quote }}
         volumeMounts:
         {{- if $.Values.mongodb.replicaSet }}
         - {name: replica-key, mountPath: /key, readOnly: true}
@@ -161,8 +172,9 @@ spec:
           claimName: mongodb
       {{- end }}
       - name: init
-        configMap:
-          name: mongodb-init
+        image:
+          reference: {{ (index .Values.images "mongo-seed").reference | quote }}
+          pullPolicy: {{ $.Values.imagePullPolicy }}
   {{- if .Values.mongodb.replicaSet }}
   volumeClaimTemplates:
   - metadata:

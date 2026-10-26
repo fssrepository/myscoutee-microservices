@@ -15,6 +15,7 @@ import pwd
 import re
 import subprocess
 import sys
+import tempfile
 
 from runtime_config import LAB
 
@@ -27,6 +28,8 @@ UNITS = ['libvirtd.service', 'libvirt-guests.service', 'virtlogd.service',
          'virtlockd.socket', 'virtlockd-admin.socket', 'libvirtd.socket',
          'libvirtd-ro.socket', 'libvirtd-admin.socket', 'libvirtd-tcp.socket',
          'libvirtd-tls.socket']
+START_COMMAND = ['/usr/bin/systemctl', 'start', 'virtlogd.socket', 'virtlockd.socket', 'libvirtd.socket']
+START_POLICY = Path('/etc/sudoers.d/myscoutee-lab-start')
 
 
 def run(*args, check=True):
@@ -168,6 +171,44 @@ def start(state):
     execute('virsh', '-c', 'qemu:///system', 'uri')
 
 
+def start_unprivileged():
+    if not all(unit_value(unit, 'ActiveState') == 'active' for unit in START_COMMAND[2:]):
+        result=run('sudo','-n',*START_COMMAND,check=False)
+        if result.returncode:
+            raise RuntimeError('Host startup is not authorized. Run host.py authorize-start once with sudo; subsequent starts never prompt for a password.')
+    run('virsh','-c','qemu:///system','uri')
+    print('Host sockets ready; no interactive sudo request and no boot enablement.')
+
+
+def authorize_start(state, user):
+    if state.get('phase') != 'installed':
+        raise RuntimeError('Run host.py install before authorizing startup.')
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]*',user) or pwd.getpwnam(user).pw_uid == 0:
+        raise RuntimeError('Invalid unprivileged lab owner.')
+    content=user+' ALL=(root) NOPASSWD: '+' '.join(START_COMMAND)+'\n'
+    if START_POLICY.is_symlink(): raise RuntimeError('Refusing symlinked startup policy.')
+    if START_POLICY.exists() and START_POLICY.read_text()!=content:
+        if hashlib.sha256(START_POLICY.read_bytes()).hexdigest()!=state.get('startup_policy_sha256'):
+            raise RuntimeError('Existing startup policy differs; preserved for review.')
+    temporary=ROOT/'startup-policy.new'
+    temporary.write_text(content);temporary.chmod(0o440)
+    try:
+        run('/usr/sbin/visudo','-cf',temporary)
+        if not START_POLICY.exists() or START_POLICY.read_text()!=content:
+            with tempfile.NamedTemporaryFile(mode='w',dir=START_POLICY.parent,prefix='.myscoutee-start-',delete=False) as output:
+                pending=Path(output.name)
+                output.write(content)
+            try:
+                pending.chmod(0o440)
+                pending.replace(START_POLICY)
+            finally: pending.unlink(missing_ok=True)
+        state['startup_policy_sha256']=hashlib.sha256(content.encode()).hexdigest()
+        state['startup_user']=user
+        save(state)
+    finally: temporary.unlink(missing_ok=True)
+    print('Authorized only the fixed three-socket startup command for the selected execution user.')
+
+
 def stop(state):
     if not state:
         return
@@ -185,6 +226,9 @@ def purge(state):
     if not state:
         print('No owned host installation remains.')
         return
+    if state.get('startup_policy_sha256') and START_POLICY.exists():
+        if START_POLICY.is_symlink() or hashlib.sha256(START_POLICY.read_bytes()).hexdigest()!=state['startup_policy_sha256']:
+            raise RuntimeError('Startup policy changed externally; preserved for review.')
     if state['phase'] == 'installed':
         start(state)
         # Delete only the package-created UNUSED default network, never an existing one.
@@ -220,15 +264,20 @@ def purge(state):
         path = Path('/etc/systemd/system') / unit
         if path.is_symlink() and os.readlink(path) == '/dev/null':
             execute('systemctl', 'unmask', unit)
+    if state.get('startup_policy_sha256') and START_POLICY.exists():
+        START_POLICY.unlink()
     (ROOT / 'inventory.json').unlink()
     print('Removed tracked host packages and membership; no autoremove or global configuration cleanup.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'start', 'stop', 'purge', 'status'])
+    parser.add_argument('action', choices=['install', 'authorize-start', 'start', 'stop', 'purge', 'status'])
     parser.add_argument('--user', default=os.environ.get('SUDO_USER', ''))
     args = parser.parse_args()
+    if os.geteuid() != 0 and args.action == 'start':
+        start_unprivileged()
+        return
     if os.geteuid() != 0:
         parser.error('Root is needed for host packages/services. Run with sudo in a terminal; never put a password in this script.')
     release = Path('/etc/os-release').read_text()
@@ -246,6 +295,8 @@ def main():
         state = json.loads(file.read_text()) if file.exists() else {}
         if args.action == 'install':
             install(state, args.user)
+        elif args.action == 'authorize-start':
+            authorize_start(state, args.user)
         elif args.action == 'start':
             start(state)
         elif args.action == 'stop':

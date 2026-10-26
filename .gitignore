@@ -9,3 +9,6 @@ __pycache__/
 crash.log
 .gradle/
 *.local.env
+
+# Local credentials, private evidence and runtime state; never publish.
+/.local/

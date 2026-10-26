@@ -42,7 +42,7 @@ build_jars() {
   local revision
   revision="$(git -C "${backend_root}" rev-parse HEAD)"
   "${support_root}/gradlew" --no-daemon --parallel \
-    -PbackendRevision="${revision}" verifyAssemblies
+    -PbackendRevision="${revision}" "${@:-verifyAssemblies}"
 }
 
 require_idle_build_owner() {
@@ -87,6 +87,9 @@ package_frontend_image() {
 
 record_image() {
   local image_ref="$1" image_id
+  install -d -m 0700 "${state_root}"
+  touch "${state_root}/images.tsv"
+  chmod 0600 "${state_root}/images.tsv"
   image_id="$(docker image inspect --format '{{.Id}}' "${image_ref}")"
   printf '%s\t%s\n' "${image_ref}" "${image_id}" >> "${state_root}/images.tsv"
 }
@@ -126,6 +129,13 @@ build_support_images() {
   touch "${state_root}/images.tsv"
   chmod 0600 "${state_root}/images.tsv"
   local service source image_ref
+  # The native Kubernetes image volume mounts these files directly. No process,
+  # sidecar or init container runs from this data-only artifact.
+  image_ref="${image_prefix}mongo-seed:${image_tag}"
+  docker build --network=none --pull=false --file "${support_root}/deploy/mongo-seed.Dockerfile" \
+    --label "com.myscoutee.task=${LAB_ISSUE}" --tag "${image_ref}" \
+    "${backend_root}/server/docker/conf/mongodb"
+  record_image "${image_ref}"
   # Production Dockerfiles own these optimized Go binaries. Build serially;
   # never overwrite the monolith's tags or start a second dev/watch process.
   while IFS=$'\t' read -r service source; do
@@ -187,7 +197,7 @@ import re, sys
 sys.path.insert(0, sys.argv[2] + '/tools')
 from runtime_config import CONFIG
 images = CONFIG['images']
-pattern = re.escape(images['prefix']) + r'[a-z0-9-]+:(?:' + re.escape(images['buildTag']) + '|' + re.escape(images['immutableVersion']) + r'-[a-f0-9]{12})'
+pattern = re.escape(images['prefix']) + r'[a-z0-9-]+:(?:' + re.escape(images['buildTag']) + '|' + re.escape(images['immutableVersion']) + r'-[a-f0-9]{12}|inputs-[a-f0-9]{64})'
 if sys.argv[1] != images['frontendBase'] and not re.fullmatch(pattern, sys.argv[1]):
     raise SystemExit(1)
 IDENTITY
@@ -274,7 +284,9 @@ case "${1:-preflight}" in
   preflight) preflight ;;
   build) build_jars; build_images ;;
   jars) build_jars ;;
+  jars-build) build_jars assembleServices; python3 "${support_root}/tools/audit-assemblies.py" --artifacts ;;
   images) build_images ;;
+  assembly-images) require_idle_build_owner; python3 "${support_root}/tools/assembly_images.py" "${@:2}" ;;
   frontend-image) build_frontend_image ;;
   frontend-package) package_frontend_image ;;
   minio-image) build_minio_image ;;
@@ -294,5 +306,5 @@ case "${1:-preflight}" in
     [[ ! -L "${build_root}" && ! -L "${build_root}/.gradle" ]] || { echo 'Refusing symlinked build paths.' >&2; exit 2; }
     rm -rf -- "${build_root}" "${build_root}/.gradle"
     ;;
-  *) echo 'Usage: lab.sh [preflight|build|jars|images|frontend-image|frontend-package|minio-image|support-images|release-simulator-image|render|monitoring-up|monitoring-stop|monitoring-destroy|monitoring-reset-password|clean-images|clean-build]' >&2; exit 2 ;;
+  *) echo 'Usage: lab.sh [preflight|build|jars|jars-build|images|frontend-image|frontend-package|minio-image|support-images|release-simulator-image|render|monitoring-up|monitoring-stop|monitoring-destroy|monitoring-reset-password|clean-images|clean-build]' >&2; exit 2 ;;
 esac

@@ -6,6 +6,8 @@ terraform {
       version = "= 0.9.9"
     }
   }
+  # terraform.sh generates a private HTTP override when the operator explicitly
+  # selects MYSCOUTEE_TERRAFORM_BACKEND=gitlab. Local state is never auto-migrated.
   backend "local" {}
 }
 
@@ -77,8 +79,8 @@ resource "libvirt_cloudinit_disk" "bootstrap" {
     manage_etc_hosts = true
     ssh_pwauth       = false
     disable_root     = true
-    package_update   = true
-    packages         = ["qemu-guest-agent", "curl", "ca-certificates", "python3"]
+    package_update   = false
+    packages         = []
     users = [{
       name                = "myscoutee"
       groups              = ["sudo"]
@@ -87,8 +89,9 @@ resource "libvirt_cloudinit_disk" "bootstrap" {
       lock_passwd         = true
       ssh_authorized_keys = [trimspace(file(var.ssh_public_key_file))]
     }]
-    write_files = [
+    write_files = concat([
       { path = "/etc/myscoutee-lab/versions.json", permissions = "0644", content = file("${path.module}/../versions.json") },
+      { path = "/usr/local/sbin/myscoutee-install-guest-packages", permissions = "0755", content = file("${path.module}/../guest/install-guest-packages.py") },
       { path = "/usr/local/sbin/myscoutee-install-k3s", permissions = "0755", content = file("${path.module}/../guest/install-k3s.sh") },
       { path = "/etc/systemd/system/k3s.service", permissions = "0644", content = file("${path.module}/../guest/k3s.service") },
       { path = "/etc/rancher/k3s/config.yaml", permissions = "0600", content = yamlencode({
@@ -99,10 +102,16 @@ resource "libvirt_cloudinit_disk" "bootstrap" {
         node-name             = local.name
         kubelet-arg           = ["max-pods=40"]
       }) }
-    ]
+      ], [for name, artifact in jsondecode(file("${path.module}/../versions.json")).guestPackages : {
+        path        = "/var/lib/myscoutee-bootstrap/${name}"
+        permissions = "0600"
+        encoding    = "b64"
+        content     = filebase64("${var.guest_package_directory}/${name}")
+    }])
     runcmd = [
+      ["/usr/local/sbin/myscoutee-install-guest-packages"],
       ["systemctl", "enable", "--now", "qemu-guest-agent"],
-      ["/usr/local/sbin/myscoutee-install-k3s"]
+      ["env", "MYSCOUTEE_K3S_HOST_STAGED=${var.k3s_host_staged}", "/usr/local/sbin/myscoutee-install-k3s"]
     ]
   })}"
 }

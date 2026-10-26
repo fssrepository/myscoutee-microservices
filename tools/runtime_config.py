@@ -21,6 +21,9 @@ sys.path.append(str(BACKEND / 'tests/e2e/microservices'))
 
 
 def validate(config):
+    rollout_timeout = config.get('rolloutTimeoutSeconds', 90)
+    if type(rollout_timeout) is not int or not 30 <= rollout_timeout <= 1800:
+        raise ValueError('rolloutTimeoutSeconds must be an integer between 30 and 1800')
     lab = config['lab']
     state = PurePosixPath(lab['stateDirectory'])
     if state.is_absolute() or not state.parts or any(
@@ -37,8 +40,8 @@ def validate(config):
     private_ranges = [ipaddress.ip_network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]  # NOSONAR - python:S1313: RFC1918 validation ranges, not remote endpoints.
     if network.version != 4 or network.prefixlen != 24 or not any(network.subnet_of(value) for value in private_ranges):
         raise ValueError('Lab network must be a private IPv4 /24')
-    if not isinstance(lab['memoryMiB'], int) or not 4096 <= lab['memoryMiB'] <= 10240:
-        raise ValueError('Lab memory must be between 4 and 10 GiB')
+    if type(lab['memoryMiB']) is not int or lab['memoryMiB'] <= 0:
+        raise ValueError('Lab memory must be a positive integer in MiB')
     ports = [config['localPort'], lab['grafanaPort'], lab['prometheusPort']]
     if len(set(ports)) != len(ports) or any(type(p) is not int or not 1024 <= p <= 65535 for p in ports):
         raise ValueError('Lab listeners require distinct unprivileged ports')
@@ -58,7 +61,7 @@ def validate(config):
 
 CONFIG = validate(json.loads((SHELL / 'deploy/runtime.json').read_text()))
 LAB = CONFIG['lab']
-STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / LAB['stateDirectory']
+STATE = Path(os.environ.get('XDG_STATE_HOME', str(BACKEND / '.local/state'))) / LAB['stateDirectory']
 
 
 if __name__ == '__main__':

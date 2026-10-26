@@ -1,6 +1,15 @@
+variable "guest_package_directory" {
+  description = "Local directory containing checksum-verified pinned Ubuntu guest DEBs, restored from the Package Registry in CI."
+  type        = string
+}
 variable "verified_cloud_image" {
   description = "Absolute local path to the checksum-verified pinned Ubuntu image."
   type        = string
+}
+variable "k3s_host_staged" {
+  description = "Receive pinned k3s and offline images from the authenticated host instead of downloading in the guest."
+  type        = bool
+  default     = false
 }
 variable "ssh_public_key_file" {
   description = "Lab-owned SSH public key; the private key stays outside Terraform and Git."
@@ -18,8 +27,8 @@ variable "memory_mib" {
   type    = number
   default = 8192
   validation {
-    condition     = var.memory_mib >= 4096 && var.memory_mib <= 10240
-    error_message = "Keep the local VM between 4 and 10 GiB; check host capacity before apply."
+    condition     = var.memory_mib > 0 && floor(var.memory_mib) == var.memory_mib
+    error_message = "VM memory must be a positive integer in MiB."
   }
 }
 variable "running" {
