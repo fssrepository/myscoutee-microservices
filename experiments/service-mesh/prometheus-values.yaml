@@ -1,0 +1,41 @@
+alertmanager:
+  enabled: false
+kube-state-metrics:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+server:
+  persistentVolume:
+    enabled: false
+  retention: 2h
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+scrapeConfigs:
+  kubernetes-api-servers:
+    enabled: false
+  kubernetes-nodes:
+    enabled: false
+  kubernetes-nodes-cadvisor:
+    enabled: false
+  kubernetes-service-endpoints:
+    enabled: false
+  kubernetes-service-endpoints-slow:
+    enabled: false
+  prometheus-pushgateway:
+    enabled: false
+  kubernetes-services:
+    enabled: false
+  kubernetes-pods-slow:
+    enabled: false
+  kubernetes-pods:
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - istio-system

@@ -585,6 +585,29 @@ def start():
     kubeconfig()
 
 
+def resume():
+    """Boot a fully recorded guest without reconciling a changed Terraform recipe."""
+    resources = ownership()
+    if set(resources) != ADDRESSES:
+        raise RuntimeError('Resume requires the complete recorded lab; use the normal start path for provisioning.')
+    preflight(resources)
+    no_autostart(resources)
+    try:
+        for kind, prefix in (('pool', 'pool-'), ('network', 'net-')):
+            info = virsh(prefix + 'info', NAME).stdout
+            if (kind == 'pool' and 'inactive' in info) or (kind == 'network' and re.search(r'^Active:\s+no$', info, re.M)):
+                virsh(prefix + 'start', NAME)
+        state = virsh('domstate', NAME).stdout.strip()
+        if state == 'shut off':
+            virsh('start', NAME)
+        elif state != 'running':
+            raise RuntimeError('Guest is neither shut off nor running: ' + state)
+        ready()
+        kubeconfig()
+    finally:
+        no_autostart(ownership())
+
+
 def stop(keep_infrastructure=False):
     resources = ownership()
     # Reuse the workload transport's exact endpoint/process ownership checks.
@@ -691,7 +714,7 @@ def require_libvirt_access():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['preflight', 'prepare', 'start', 'ready', 'stop', 'destroy', 'status', 'kubeconfig', 'ssh', 'observe', 'console'])
+    parser.add_argument('action', choices=['preflight', 'prepare', 'start', 'resume', 'ready', 'stop', 'destroy', 'status', 'kubeconfig', 'ssh', 'observe', 'console'])
     parser.add_argument('--once', action='store_true', help='Print one observe snapshot and exit.')
     args = parser.parse_args()
     if args.once and args.action != 'observe':
@@ -714,6 +737,8 @@ def main():
             prepare()
         elif args.action == 'start':
             start()
+        elif args.action == 'resume':
+            resume()
         elif args.action == 'ready':
             require_ready()
         elif args.action == 'stop':

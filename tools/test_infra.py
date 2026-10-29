@@ -909,6 +909,33 @@ if __name__ == '__main__':
 
 
 class OptionalInfrastructureTest(unittest.TestCase):
+    def test_resume_preserves_existing_guest_without_terraform(self):
+        resources = {name: {} for name in vm.ADDRESSES}
+        events = []
+        def virsh(*args, **kwargs):
+            events.append(args)
+            values = {'pool-info': 'State: inactive\n', 'net-info': 'Active: no\n',
+                      'domstate': 'shut off\n'}
+            return subprocess.CompletedProcess([], 0, values.get(args[0], ''))
+        with patch.object(vm, 'ownership', return_value=resources), \
+             patch.object(vm, 'preflight'), patch.object(vm, 'no_autostart'), \
+             patch.object(vm, 'virsh', side_effect=virsh), \
+             patch.object(vm, 'ready') as ready, patch.object(vm, 'kubeconfig') as kubeconfig, \
+             patch.object(vm, 'terraform', side_effect=AssertionError('Resume must not reconcile Terraform')):
+            vm.resume()
+        self.assertIn(('start', vm.NAME), events)
+        self.assertIn(('pool-start', vm.NAME), events)
+        self.assertIn(('net-start', vm.NAME), events)
+        ready.assert_called_once()
+        kubeconfig.assert_called_once()
+
+    def test_resume_rejects_incomplete_state_before_starting(self):
+        with patch.object(vm, 'ownership', return_value={'libvirt_domain.lab': {}}), \
+             patch.object(vm, 'virsh') as virsh:
+            with self.assertRaisesRegex(RuntimeError, 'complete recorded lab'):
+                vm.resume()
+            virsh.assert_not_called()
+
     def test_domain_only_shutdown_keeps_network_and_storage_active(self):
         resources = {key: {} for key in ('libvirt_domain.lab', 'libvirt_network.lab', 'libvirt_pool.lab')}
         with patch.object(vm, 'ownership', return_value=resources), patch.object(vm, 'run'), \
